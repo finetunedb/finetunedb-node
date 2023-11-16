@@ -40,7 +40,7 @@ async function main() {
   const completion = await openai.chat.completions.create({
     messages: [{ role: "user", content: "Hello world!" }],
     model: "gpt-3.5-turbo",
-    // Optional: Step 2 - 
+    // Optional: Step 2 - Log a chat completion
     finetunedb: {
       // Define the project ID 
       projectId: "cloio7t90000...",
