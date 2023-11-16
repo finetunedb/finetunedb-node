@@ -43,9 +43,9 @@ async function main() {
     // Optional: Step 2 - 
     finetunedb: {
       // Define the project ID 
-      projectId: "cloio7t90000..."
+      projectId: "cloio7t90000...",
       // Optional: Add custom searchable tags
-      tags: ["test-prompt"]
+      tags: ["test-prompt"],
       // Enable/disable data collection. Defaults to true.
       logRequest: true, 
     },
