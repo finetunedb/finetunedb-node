@@ -1,0 +1,223 @@
+import * as openai from "openai";
+import * as Core from "openai/core";
+import { readEnv } from "openai/core";
+import type { Stream } from "openai/streaming";
+import type {
+    ChatCompletion,
+    ChatCompletionChunk,
+    ChatCompletionCreateParams,
+    ChatCompletionCreateParamsBase,
+    ChatCompletionCreateParamsNonStreaming,
+    ChatCompletionCreateParamsStreaming,
+} from "openai/resources/chat/completions";
+import { FinetuneDbCompletionArgs, type FinetuneDbClientOptions, FinetuneDbCompletionMeta } from "./shared";
+import { WrappedStream } from "./openai/streaming";
+import FinetuneDbClient from "./finetuneDb";
+
+
+export type ClientOptions = openai.ClientOptions & { finetunedb?: FinetuneDbClientOptions };
+
+export default class OpenAI extends openai.OpenAI {
+    public finetuneDbClient?: FinetuneDbClient
+
+    constructor({ finetunedb, ...options }: ClientOptions = {}) {
+        super({ ...options });
+
+        const finetuneDbApiKey = finetunedb?.apiKey ?? readEnv("FINETUNEDB_API_KEY");
+        const finetuneDbBaseUrl = finetunedb?.baseUrl;
+
+        if (finetuneDbApiKey && finetuneDbBaseUrl) {
+            this.chat.setClient(
+                new FinetuneDbClient({
+                    apiKey: finetuneDbApiKey,
+                    baseUrl: finetuneDbBaseUrl,
+                }),
+            );
+        } else {
+            console.warn(
+                "You're using the FinetuneDB client without an API key. No completion requests will be logged.",
+            );
+        }
+    }
+
+    // Override the default completion method to log requests to FinetuneDB
+    chat: WrappedChat = new WrappedChat(this);
+}
+
+class WrappedChat extends openai.OpenAI.Chat {
+    setClient(client: FinetuneDbClient) {
+        this.completions.finetuneDbClient = client;
+    }
+
+    completions: WrappedCompletions = new WrappedCompletions(this.client);
+}
+
+class WrappedCompletions extends openai.OpenAI.Chat.Completions {
+    // keep a reference to the original client so we can read options from it
+    openaiClient: openai.OpenAI;
+    finetuneDbClient?: FinetuneDbClient;
+
+    constructor(client: openai.OpenAI, finetuneDbClient?: FinetuneDbClient) {
+        super(client);
+        this.openaiClient = client;
+        this.finetuneDbClient = finetuneDbClient;
+    }
+
+    async _report(
+        {
+            projectId,
+            body,
+            response,
+            latency,
+            tags = []
+        }: {
+            projectId: string,
+            body: (ChatCompletionCreateParamsBase | ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming) & FinetuneDbCompletionArgs,
+            response: ChatCompletion | null,
+            latency: number,
+            tags?: string[],
+        }
+    ) {
+        try {
+            if (this.finetuneDbClient) {
+                return this.finetuneDbClient.logCompletion({
+                    projectId,
+                    body,
+                    response,
+                    latency,
+                    tags
+                })
+            }
+            return Promise.resolve();
+        } catch (e) {
+            // Ignore errors with reporting
+        }
+    }
+
+    _create(
+        body: ChatCompletionCreateParamsNonStreaming,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<ChatCompletion>;
+    _create(
+        body: ChatCompletionCreateParamsStreaming,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<Stream<ChatCompletionChunk>>;
+    _create(
+        body: ChatCompletionCreateParams,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<ChatCompletion | Stream<ChatCompletionChunk>> {
+        let resp: Core.APIPromise<ChatCompletion | Stream<ChatCompletionChunk>>;
+        resp = body.stream ? super.create(body, options) : super.create(body, options);
+        return resp;
+    }
+
+    // @ts-expect-error Type mismatch because a `Promise<>` is being used.
+    // wrapper but I actually think the types are correct here.
+    create(
+        body: ChatCompletionCreateParamsNonStreaming & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<ChatCompletion & { finetunedb: FinetuneDbCompletionMeta }>;
+    create(
+        body: ChatCompletionCreateParamsStreaming & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<WrappedStream>;
+    create(
+        body: ChatCompletionCreateParamsBase & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<Stream<ChatCompletionChunk> | ChatCompletion>;
+    async create(
+        { finetunedb: rawFinetunedb, ...body }: ChatCompletionCreateParams & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Promise<Core.APIPromise<(ChatCompletion & { finetunedb: FinetuneDbCompletionMeta }) | WrappedStream>> {
+        const finetunedb = {
+            logRequest: true,
+            ...rawFinetunedb
+        };
+        const requestedAt = Date.now();
+        let logResult: FinetuneDbCompletionMeta["logResult"] = Promise.resolve();
+
+        const startTime = Date.now();
+        try {
+            if (body.stream) {
+                const stream = await this._create(body, options);
+                try {
+                    return new WrappedStream(stream, (response) => {
+                        if (!finetunedb.projectId) {
+                            console.warn(
+                                "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
+                            );
+                            return Promise.resolve();
+                        }
+                        if (!finetunedb.logRequest) return Promise.resolve();
+                        return this._report({
+                            projectId: finetunedb.projectId,
+                            body: body,
+                            response: response,
+                            latency: Date.now() - startTime,
+                            tags: finetunedb.tags,
+                        });
+                    });
+                } catch (e) {
+                    console.error("FinetuneDB: error creating wrapped stream");
+                    console.error(e);
+                    throw e;
+                }
+            } else {
+                const response = await this._create(body, options);
+
+                if (!finetunedb.projectId) {
+                    console.warn(
+                        "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
+                    );
+                }
+
+                logResult = finetunedb.logRequest && finetunedb.projectId
+                    ? this._report({
+                        projectId: finetunedb.projectId,
+                        body: body,
+                        response: response,
+                        latency: Date.now() - startTime,
+                        tags: finetunedb.tags,
+                    })
+                    : Promise.resolve();
+
+                return {
+                    ...response,
+                    finetunedb: {
+                        logResult,
+                    },
+                };
+            }
+        } catch (error: unknown) {
+            if (error instanceof openai.APIError) {
+                const rawMessage = error.message as string | string[];
+                const message = Array.isArray(rawMessage) ? rawMessage.join(", ") : rawMessage;
+                if (!finetunedb.projectId) {
+                    console.warn(
+                        "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
+                    );
+                }
+                else {
+                    logResult = this._report({
+                        projectId: finetunedb.projectId,
+                        body: body,
+                        response: null,
+                        latency: Date.now() - startTime,
+                        tags: finetunedb.tags,
+                    });
+                }
+            }
+            // make sure error is an object we can add properties to
+            if (typeof error === "object" && error !== null) {
+                error = {
+                    ...error,
+                    finetunedb: {
+                        logResult,
+                    },
+                };
+            }
+
+            throw error;
+        }
+    }
+}

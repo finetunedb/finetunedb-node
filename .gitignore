@@ -1,0 +1,6 @@
+.env
+.yalc
+yalc.lock
+dist/
+node_modules/
+index.test.ts
