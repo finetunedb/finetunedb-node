@@ -80,7 +80,7 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
     ) {
         try {
             if (this.finetuneDbClient) {
-                return this.finetuneDbClient.logCompletion({
+                return this.finetuneDbClient.logChatCompletion({
                     projectId,
                     body,
                     response,

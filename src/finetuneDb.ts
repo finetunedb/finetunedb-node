@@ -31,7 +31,7 @@ export default class FinetuneDbClient {
         });
     }
 
-    async logCompletion(
+    async logChatCompletion(
         {
             projectId,
             body,
@@ -50,14 +50,11 @@ export default class FinetuneDbClient {
             return;
         }
 
-        /*
-        
-        */
-
         const request = {
             id: "",
             tags: tags,
             source: "openai-node",
+            logType: "openai-chatCompletion",
             projectId: projectId,
             modelParameters: {
                 provider: "openai",
