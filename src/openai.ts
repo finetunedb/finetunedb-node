@@ -13,6 +13,7 @@ import type {
 import { FinetuneDbCompletionArgs, type FinetuneDbClientOptions, FinetuneDbCompletionMeta } from "./shared";
 import { WrappedStream } from "./openai/streaming";
 import FinetuneDbClient from "./finetuneDb";
+import { CreateEmbeddingResponse, EmbeddingCreateParams, Embeddings } from "openai/resources";
 
 
 export type ClientOptions = openai.ClientOptions & { finetunedb?: FinetuneDbClientOptions };
@@ -27,12 +28,12 @@ export default class OpenAI extends openai.OpenAI {
         const finetuneDbBaseUrl = finetunedb?.baseUrl;
 
         if (finetuneDbApiKey && finetuneDbBaseUrl) {
-            this.chat.setClient(
-                new FinetuneDbClient({
-                    apiKey: finetuneDbApiKey,
-                    baseUrl: finetuneDbBaseUrl,
-                }),
-            );
+            const client = new FinetuneDbClient({
+                apiKey: finetuneDbApiKey,
+                baseUrl: finetuneDbBaseUrl,
+            });
+            this.chat.setClient(client);
+            this.embeddings.setClient(client);
         } else {
             console.warn(
                 "You're using the FinetuneDB client without an API key. No completion requests will be logged.",
@@ -42,6 +43,7 @@ export default class OpenAI extends openai.OpenAI {
 
     // Override the default completion method to log requests to FinetuneDB
     chat: WrappedChat = new WrappedChat(this);
+    embeddings: WrappedEmbeddings = new WrappedEmbeddings(this);
 }
 
 class WrappedChat extends openai.OpenAI.Chat {
@@ -60,32 +62,42 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
     constructor(client: openai.OpenAI, finetuneDbClient?: FinetuneDbClient) {
         super(client);
         this.openaiClient = client;
+
         this.finetuneDbClient = finetuneDbClient;
     }
 
     async _report(
         {
             projectId,
+            parentId,
             body,
             response,
             latency,
-            tags = []
+            tags = [],
+            error = "",
+            metadata = {},
         }: {
             projectId: string,
+            parentId?: string,
             body: (ChatCompletionCreateParamsBase | ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming) & FinetuneDbCompletionArgs,
             response: ChatCompletion | null,
             latency: number,
             tags?: string[],
+            error?: string,
+            metadata?: Record<string, any>,
         }
     ) {
         try {
             if (this.finetuneDbClient) {
                 return this.finetuneDbClient.logChatCompletion({
                     projectId,
+                    parentId: parentId ?? "",
                     body,
                     response,
+                    error,
                     latency,
-                    tags
+                    tags,
+                    metadata,
                 })
             }
             return Promise.resolve();
@@ -133,10 +145,9 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
             logRequest: true,
             ...rawFinetunedb
         };
-        const requestedAt = Date.now();
+        const startTime = Date.now();
         let logResult: FinetuneDbCompletionMeta["logResult"] = Promise.resolve();
 
-        const startTime = Date.now();
         try {
             if (body.stream) {
                 const stream = await this._create(body, options);
@@ -151,10 +162,12 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                         if (!finetunedb.logRequest) return Promise.resolve();
                         return this._report({
                             projectId: finetunedb.projectId,
+                            parentId: finetunedb.parentId,
                             body: body,
                             response: response,
                             latency: Date.now() - startTime,
                             tags: finetunedb.tags,
+                            metadata: finetunedb.metadata,
                         });
                     });
                 } catch (e) {
@@ -174,10 +187,12 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                 logResult = finetunedb.logRequest && finetunedb.projectId
                     ? this._report({
                         projectId: finetunedb.projectId,
+                        parentId: finetunedb.parentId,
                         body: body,
                         response: response,
                         latency: Date.now() - startTime,
                         tags: finetunedb.tags,
+                        metadata: finetunedb.metadata,
                     })
                     : Promise.resolve();
 
@@ -185,6 +200,13 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                     ...response,
                     finetunedb: {
                         logResult,
+                        getLastLogId: async () => {
+                            const result = await logResult;
+                            if (result?.data?.id) {
+                                return result?.data?.id;
+                            }
+                            return undefined;
+                        }
                     },
                 };
             }
@@ -200,13 +222,171 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                 else {
                     logResult = this._report({
                         projectId: finetunedb.projectId,
+                        parentId: finetunedb.parentId,
                         body: body,
                         response: null,
                         latency: Date.now() - startTime,
                         tags: finetunedb.tags,
+                        error: message,
+                        metadata: finetunedb.metadata,
                     });
                 }
             }
+
+            // make sure error is an object we can add properties to
+            if (typeof error === "object" && error !== null) {
+                error = {
+                    ...error,
+                    finetunedb: {
+                        logResult,
+                    },
+                };
+            }
+
+            throw error;
+        }
+    }
+}
+
+class WrappedEmbeddings extends openai.OpenAI.Embeddings {
+    // keep a reference to the original client so we can read options from it
+    client: openai.OpenAI;
+    finetuneDbClient?: FinetuneDbClient;
+
+    constructor(client: openai.OpenAI, finetuneDbClient?: FinetuneDbClient) {
+        super(client);
+        this.client = client;
+        this.finetuneDbClient = finetuneDbClient;
+    }
+
+    setClient(client: FinetuneDbClient) {
+        this.finetuneDbClient = client;
+    }
+
+    private async _report(
+
+        {
+            projectId,
+            parentId,
+            body,
+            response,
+            latency,
+            error = "",
+            tags = [],
+            metadata = {},
+        }: {
+            projectId: string,
+            parentId?: string,
+            body: EmbeddingCreateParams & FinetuneDbCompletionArgs,
+            response: CreateEmbeddingResponse | null,
+            latency: number,
+            error?: string,
+            tags?: string[],
+            metadata?: Record<string, any>,
+        }
+    ) {
+        try {
+            if (this.finetuneDbClient) {
+                return this.finetuneDbClient.logEmbedding({
+                    projectId,
+                    parentId: parentId ?? "",
+                    body,
+                    response,
+                    latency,
+                    tags,
+                    metadata,
+                })
+            }
+            return Promise.resolve();
+        } catch (e) {
+            // Ignore errors with reporting
+        }
+    }
+
+    private _create(
+        body: EmbeddingCreateParams,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<CreateEmbeddingResponse> {
+        let resp: Core.APIPromise<CreateEmbeddingResponse>;
+        resp = super.create(body, options);
+        return resp;
+    }
+
+    // @ts-expect-error Type mismatch because a `Promise<>` is being used.
+    // wrapper but I actually think the types are correct here.
+    create(
+        body: EmbeddingCreateParams & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Core.APIPromise<CreateEmbeddingResponse & { finetunedb: FinetuneDbCompletionMeta }>;
+    async create(
+        { finetunedb: rawFinetunedb, ...body }: EmbeddingCreateParams & FinetuneDbCompletionArgs,
+        options?: Core.RequestOptions,
+    ): Promise<Core.APIPromise<CreateEmbeddingResponse & { finetunedb: FinetuneDbCompletionMeta }>> {
+        const finetunedb = {
+            logRequest: true,
+            ...rawFinetunedb
+        };
+        const startTime = Date.now();
+        let logResult: FinetuneDbCompletionMeta["logResult"] = Promise.resolve();
+
+        try {
+            const response = await this._create(body, options);
+
+            if (!finetunedb.projectId) {
+                console.warn(
+                    "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
+                );
+            }
+
+            logResult = finetunedb.logRequest && finetunedb.projectId
+                ? this._report({
+                    projectId: finetunedb.projectId,
+                    parentId: finetunedb.parentId,
+                    body: body,
+                    response: response,
+                    latency: Date.now() - startTime,
+                    tags: finetunedb.tags,
+                    error: "",
+                    metadata: finetunedb.metadata,
+                })
+                : Promise.resolve();
+
+            return {
+                ...response,
+                finetunedb: {
+                    logResult,
+                    getLastLogId: async () => {
+                        const result = await logResult;
+                        if (result?.data?.id) {
+                            return result?.data?.id;
+                        }
+                        return undefined;
+                    }
+                },
+            };
+        } catch (error: unknown) {
+            if (error instanceof openai.APIError) {
+                const rawMessage = error.message as string | string[];
+                const message = Array.isArray(rawMessage) ? rawMessage.join(", ") : rawMessage;
+                if (!finetunedb.projectId) {
+                    console.warn(
+                        "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
+                    );
+                }
+                else {
+                    logResult = this._report({
+                        projectId: finetunedb.projectId,
+                        parentId: finetunedb.parentId,
+                        body: body,
+                        response: null,
+                        latency: Date.now() - startTime,
+                        error: message,
+                        tags: finetunedb.tags,
+                        metadata: finetunedb.metadata,
+                    });
+                }
+            }
+
             // make sure error is an object we can add properties to
             if (typeof error === "object" && error !== null) {
                 error = {
