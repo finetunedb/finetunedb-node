@@ -26,9 +26,11 @@ export default class OpenAI extends openai.OpenAI {
 
         const finetuneDbApiKey = finetunedb?.apiKey ?? readEnv("FINETUNEDB_API_KEY");
         const finetuneDbBaseUrl = finetunedb?.baseUrl;
+        const finetuneDbProjectId = finetunedb?.projectId ?? readEnv("FINETUNEDB_PROJECT_ID");
 
         if (finetuneDbApiKey && finetuneDbBaseUrl) {
             const client = new FinetuneDbClient({
+                projectId: finetuneDbProjectId ?? "",
                 apiKey: finetuneDbApiKey,
                 baseUrl: finetuneDbBaseUrl,
             });
@@ -51,7 +53,7 @@ class WrappedChat extends openai.OpenAI.Chat {
         this.completions.finetuneDbClient = client;
     }
 
-    completions: WrappedCompletions = new WrappedCompletions(this.client);
+    completions: WrappedCompletions = new WrappedCompletions(this._client);
 }
 
 class WrappedCompletions extends openai.OpenAI.Chat.Completions {
@@ -77,7 +79,7 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
             error = "",
             metadata = {},
         }: {
-            projectId: string,
+            projectId?: string,
             parentId?: string,
             body: (ChatCompletionCreateParamsBase | ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming) & FinetuneDbCompletionArgs,
             response: ChatCompletion | null,
@@ -90,8 +92,10 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
         try {
             if (this.finetuneDbClient) {
                 return this.finetuneDbClient.logChatCompletion({
-                    projectId,
+                    projectId: projectId ? projectId : this.finetuneDbClient.projectId,
                     parentId: parentId ?? "",
+                    name: "",
+                    provider: "openai",
                     body,
                     response,
                     error,
@@ -153,7 +157,7 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                 const stream = await this._create(body, options);
                 try {
                     return new WrappedStream(stream, (response) => {
-                        if (!finetunedb.projectId) {
+                        if (!finetunedb.projectId && !(this.finetuneDbClient && this.finetuneDbClient.projectId)) {
                             console.warn(
                                 "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
                             );
@@ -161,7 +165,7 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                         }
                         if (!finetunedb.logRequest) return Promise.resolve();
                         return this._report({
-                            projectId: finetunedb.projectId,
+                            projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
                             parentId: finetunedb.parentId,
                             body: body,
                             response: response,
@@ -178,15 +182,15 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
             } else {
                 const response = await this._create(body, options);
 
-                if (!finetunedb.projectId) {
+                if (!finetunedb.projectId && !(this.finetuneDbClient && this.finetuneDbClient.projectId)) {
                     console.warn(
                         "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
                     );
                 }
 
-                logResult = finetunedb.logRequest && finetunedb.projectId
+                logResult = finetunedb.logRequest && (finetunedb.projectId || this.finetuneDbClient?.projectId)
                     ? this._report({
-                        projectId: finetunedb.projectId,
+                        projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
                         parentId: finetunedb.parentId,
                         body: body,
                         response: response,
@@ -206,6 +210,16 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
                                 return result?.data?.id;
                             }
                             return undefined;
+                        },
+                        updateLastLog: async (update) => {
+                            const result = await logResult;
+                            if (result?.data?.id) {
+                                return await this.finetuneDbClient?.updateLog(result?.data?.id, {
+                                    ...update,
+                                    projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
+                                });
+                            }
+                            return undefined;
                         }
                     },
                 };
@@ -214,14 +228,14 @@ class WrappedCompletions extends openai.OpenAI.Chat.Completions {
             if (error instanceof openai.APIError) {
                 const rawMessage = error.message as string | string[];
                 const message = Array.isArray(rawMessage) ? rawMessage.join(", ") : rawMessage;
-                if (!finetunedb.projectId) {
+                if (!finetunedb.projectId && !(this.finetuneDbClient && this.finetuneDbClient.projectId)) {
                     console.warn(
                         "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
                     );
                 }
                 else {
                     logResult = this._report({
-                        projectId: finetunedb.projectId,
+                        projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
                         parentId: finetunedb.parentId,
                         body: body,
                         response: null,
@@ -275,7 +289,7 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
             tags = [],
             metadata = {},
         }: {
-            projectId: string,
+            projectId?: string,
             parentId?: string,
             body: EmbeddingCreateParams & FinetuneDbCompletionArgs,
             response: CreateEmbeddingResponse | null,
@@ -288,7 +302,7 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
         try {
             if (this.finetuneDbClient) {
                 return this.finetuneDbClient.logEmbedding({
-                    projectId,
+                    projectId: projectId ? projectId : this.finetuneDbClient.projectId,
                     parentId: parentId ?? "",
                     body,
                     response,
@@ -332,15 +346,15 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
         try {
             const response = await this._create(body, options);
 
-            if (!finetunedb.projectId) {
+            if (!finetunedb.projectId && !(this.finetuneDbClient && this.finetuneDbClient.projectId)) {
                 console.warn(
                     "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
                 );
             }
 
-            logResult = finetunedb.logRequest && finetunedb.projectId
+            logResult = finetunedb.logRequest && (finetunedb.projectId || this.finetuneDbClient?.projectId)
                 ? this._report({
-                    projectId: finetunedb.projectId,
+                    projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
                     parentId: finetunedb.parentId,
                     body: body,
                     response: response,
@@ -361,6 +375,16 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
                             return result?.data?.id;
                         }
                         return undefined;
+                    },
+                    updateLastLog: async (update) => {
+                        const result = await logResult;
+                        if (result?.data?.id) {
+                            return await this.finetuneDbClient?.updateLog(result?.data?.id, {
+                                ...update,
+                                projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
+                            });
+                        }
+                        return undefined;
                     }
                 },
             };
@@ -368,14 +392,14 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
             if (error instanceof openai.APIError) {
                 const rawMessage = error.message as string | string[];
                 const message = Array.isArray(rawMessage) ? rawMessage.join(", ") : rawMessage;
-                if (!finetunedb.projectId) {
+                if (!finetunedb.projectId && !(this.finetuneDbClient && this.finetuneDbClient.projectId)) {
                     console.warn(
                         "You're using the FinetuneDB client without a project ID. No completion requests will be logged.",
                     );
                 }
                 else {
                     logResult = this._report({
-                        projectId: finetunedb.projectId,
+                        projectId: finetunedb.projectId ? finetunedb.projectId : this.finetuneDbClient?.projectId ?? "",
                         parentId: finetunedb.parentId,
                         body: body,
                         response: null,

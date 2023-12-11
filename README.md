@@ -44,14 +44,17 @@ async function main() {
     finetunedb: {
       // Define the project ID 
       projectId: "cloio7t90000...",
-      // Optional: Add custom searchable tags
-      tags: ["test-prompt"],
       // Enable/disable data collection. Defaults to true.
       logRequest: true, 
+      // Optional: Add custom searchable tags
+      tags: ["test-prompt"],
     },
   });
 
-  console.log(completion.choices);
+  // Optional: Update log
+  await completion.finetunedb.updateLastLog({
+    tags: ["test-prompt", "new-tag"]
+  })
 }
 
 main();
@@ -68,6 +71,6 @@ Imagine your app uses multiple fine-tuned models for specific tasks, each tasks 
 It's good practice to fine-tune task specific models.
 
 
-### <b>What if the finetunedb client is misconfigured or if the platform goes down? Will my OpenAI calls stop working?</b>
+### <b>Will OpenAI calls fail if the FinetuneDB client is misconfigured or the platform is down?</b>
 
 Your OpenAI calls will continue to function as expected no matter what. The sdk handles logging errors gracefully without affecting OpenAI inference.

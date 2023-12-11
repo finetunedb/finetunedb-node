@@ -22,6 +22,9 @@ export class WrappedStream extends Stream<ChatCompletionChunk> {
             logResult,
             getLastLogId: async () => {
                 return "";
+            },
+            updateLastLog: async () => {
+                return undefined;
             }
         };
     }

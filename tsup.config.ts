@@ -12,6 +12,7 @@ const config: Options = {
         "src/openai.ts", // 'openai' sub-module
         "src/openai/mergeChunks.ts", // 'openai/mergeChunks' sub-module
         "src/openai/streaming.ts", // 'openai/streaming' sub-module
+        "src/langchain/langchainCallback.ts", // 'langchain/langchainCallback' sub-module
     ],
 
     // Define format of the output bundles
