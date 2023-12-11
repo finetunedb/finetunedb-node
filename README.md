@@ -23,7 +23,7 @@ yarn add finetunedb
 4. Configure the FinetuneDB client as shown below
 
 ```js
-// import OpenAI from 'finetunedb'
+// import OpenAI from 'openai'
 import OpenAI from "finetunedb/openai";
 
 // Fully compatible with original OpenAI initialization
