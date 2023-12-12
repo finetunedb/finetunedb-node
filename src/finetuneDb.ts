@@ -76,7 +76,7 @@ export default class FinetuneDbClient {
         }
 
         try {
-            const response = await this.postRequest('/log', request);
+            const response = await this.postRequest('/logs', request);
             const data: FinetuneDbPostLogResponse = await response.json();
             return data;
         }

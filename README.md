@@ -18,7 +18,7 @@ yarn add finetunedb
 ## Usage
 
 1. Create a workspace at https://app.finetunedb.com
-2. Find your workspace's API key from the integrations settings
+2. Generate an API key from the workspace settings
 3. Find the project ID you want to log to
 4. Configure the FinetuneDB client as shown below
 
