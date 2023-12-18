@@ -1,6 +1,6 @@
 {
   "name": "finetunedb-dev",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Client library for the FinetuneDB API",
   "main": "index.js",
   "publishConfig": {

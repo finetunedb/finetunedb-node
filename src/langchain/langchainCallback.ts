@@ -156,15 +156,37 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
                     });
                 }
                 else if (message.constructor.name === "AIMessage") {
-                    formattedMessages.push({
-                        role: "assistant",
-                        content: message.content ? message.content as string : "",
-                    });
+                    if (message.additional_kwargs?.function_call) {
+                        formattedMessages.push({
+                            role: "assistant",
+                            tool_calls: [{
+                                id: "",
+                                function: {
+                                    arguments: message.additional_kwargs?.function_call.arguments,
+                                    name: message.additional_kwargs?.function_call.name
+                                },
+                                type: "function"
+                            }],
+                            content: message.content ? message.content as string : "",
+                        });
+                    } else {
+                        formattedMessages.push({
+                            role: "assistant",
+                            content: message.content ? message.content as string : "",
+                        });
+                    }
                 }
                 else if (message.constructor.name === "HumanMessage") {
                     formattedMessages.push({
                         role: "user",
                         content: message.content ? message.content as string : "",
+                    });
+                }
+                else if (message.constructor.name === "FunctionMessage") {
+                    formattedMessages.push({
+                        role: "tool",
+                        content: message.content ? message.content as string : "",
+                        tool_call_id: message.name ? message.name as string : "",
                     });
                 }
             });
@@ -384,12 +406,27 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
 
             let finalOutput = "" as string | ChatCompletionMessageParam[];
             let type;
-            if (!lastResponse.text && "message" in lastResponse && lastResponse["message"] instanceof AIMessage && lastResponse["message"].additional_kwargs) {
+            if ("message" in lastResponse && lastResponse["message"] instanceof AIMessage && lastResponse["message"].additional_kwargs) {
                 type = "CHATCOMPLETION"
-                finalOutput = [{
-                    role: "assistant",
-                    content: lastResponse.text,
-                }]
+                if (lastResponse["generationInfo"]?.finish_reason === "function_call") {
+                    finalOutput = [{
+                        role: "assistant",
+                        tool_calls: [{
+                            id: "",
+                            function: {
+                                arguments: lastResponse["message"].additional_kwargs?.function_call?.arguments ?? "",
+                                name: lastResponse["message"].additional_kwargs?.function_call?.name ?? ""
+                            },
+                            type: "function"
+                        }],
+                        content: lastResponse["message"].content ? lastResponse["message"].content as string : "",
+                    }]
+                } else {
+                    finalOutput = [{
+                        role: "assistant",
+                        content: lastResponse.text,
+                    }]
+                }
             } else {
                 type = "COMPLETION"
                 finalOutput = lastResponse.text;
@@ -411,6 +448,28 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
 
     async handleLLMNewToken(token: string, idx: NewTokenIndices, runId: string, parentRunId?: string | undefined, tags?: string[] | undefined, fields?: HandleLLMNewTokenCallbackFields | undefined) {
 
+    }
+
+    async handleToolStart(tool: Serialized, input: string, runId: string, parentRunId?: string | undefined, tags?: string[] | undefined, metadata?: Record<string, unknown> | undefined, name?: string | undefined) {
+        try {
+            await this.generateLog(tool, runId, input, parentRunId, tags, metadata);
+        } catch (e) {
+            console.log("Error:", e);
+        }
+    }
+
+    async handleToolEnd(output: string, runId: string, parentRunId?: string | undefined): Promise<void> {
+        try {
+            const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
+                projectId: this.projectId ?? "",
+                source: "langchain",
+                parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
+                output: output,
+                latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+            });
+        } catch (e) {
+            console.log("Error:", e);
+        }
     }
 
     async handleLLMError(error: Error, runId: string, parentRunId?: string | undefined): Promise<void> {
