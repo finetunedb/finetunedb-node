@@ -406,7 +406,10 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
 
             let finalOutput = "" as string | ChatCompletionMessageParam[];
             let type;
-            if ("message" in lastResponse && lastResponse["message"] instanceof AIMessage && lastResponse["message"].additional_kwargs) {
+
+            if ("message" in lastResponse) {
+
+                const message = lastResponse["message"] as AIMessage | SystemMessage | HumanMessage;
                 type = "CHATCOMPLETION"
                 if (lastResponse["generationInfo"]?.finish_reason === "function_call") {
                     finalOutput = [{
@@ -414,12 +417,12 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
                         tool_calls: [{
                             id: "",
                             function: {
-                                arguments: lastResponse["message"].additional_kwargs?.function_call?.arguments ?? "",
-                                name: lastResponse["message"].additional_kwargs?.function_call?.name ?? ""
+                                arguments: message.additional_kwargs?.function_call?.arguments ?? "",
+                                name: message.additional_kwargs?.function_call?.name ?? ""
                             },
                             type: "function"
                         }],
-                        content: lastResponse["message"].content ? lastResponse["message"].content as string : "",
+                        content: message.content ? message.content as string : "",
                     }]
                 } else {
                     finalOutput = [{
