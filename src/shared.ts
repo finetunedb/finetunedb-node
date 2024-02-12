@@ -7,12 +7,9 @@ export type FinetuneDbClientOptions = {
 };
 
 export type FinetuneDbCompletionMeta = {
-    // We report your call to FinetuneDB asynchronously in the background. If you
-    // need to wait until the log is sent to take further action, you can await
-    // this promise.
-    logResult: Promise<FinetuneDbPostLogResponse | void>;
-    getLastLogId: () => Promise<string | undefined>;
-    updateLastLog: (update: FinetuneDbPutLogRequest) => Promise<FinetuneDbPutLogResponse | undefined>;
+    logId: string;
+    getLastLogId: () => string;
+    updateLastLog: (update: FinetuneDbPutLogRequest) => Promise<string | undefined>;
 };
 
 export type FinetuneDbCompletionArgs = {
@@ -75,6 +72,8 @@ export type FinetuneDbPostLogRequest = {
     metadata: Record<string, any>;
     error?: string;
     latencyMs?: number;
+    inputTokenCount?: number;
+    outputTokenCount?: number;
 }
 
 export type FinetuneDbPutLogRequest = {
@@ -90,4 +89,24 @@ export type FinetuneDbPutLogRequest = {
     latencyMs?: number;
     input?: SimpleInput | ChatCompletionMessageParam[] | EmbeddingCreateParams["input"];
     output?: SimpleOutput | ChatCompletionMessage[] | (CreateEmbeddingResponse["data"]);
+    inputTokenCount?: number;
+    outputTokenCount?: number;
+}
+
+export type FinetuneDbIngestResponseData = {
+    id: string;
+    type: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export type FinetuneDbIngestResponse = {
+    success: boolean;
+    finished: boolean;
+    data: Array<{
+        id: string;
+        success: boolean;
+        error: string;
+        data: FinetuneDbIngestResponseData;
+    }>
 }

@@ -1,16 +1,26 @@
-import type {
-    ChatCompletion,
-    ChatCompletionCreateParamsBase,
-    ChatCompletionCreateParamsNonStreaming,
-    ChatCompletionCreateParamsStreaming,
-} from "openai/resources/chat/completions";
-import { FinetuneDbCompletionArgs, FinetuneDbPostLogRequest, FinetuneDbPostLogResponse, FinetuneDbPutLogRequest, SimpleInput, SimpleOutput } from './shared';
-import { Completion, CompletionChoice, CompletionCreateParams, CreateEmbeddingResponse, EmbeddingCreateParams } from 'openai/resources';
+import { ChatCompletion, ChatCompletionCreateParamsBase, ChatCompletionCreateParamsNonStreaming, ChatCompletionCreateParamsStreaming } from "openai/resources/chat/completions";
+import { FinetuneDbCompletionArgs, FinetuneDbIngestResponse, FinetuneDbIngestResponseData, FinetuneDbPostLogRequest, FinetuneDbPostLogResponse, FinetuneDbPutLogRequest, FinetuneDbPutLogResponse, SimpleInput, SimpleOutput } from "./shared";
+import { debounce } from "./utils/debounce";
+import { createId } from '@paralleldrive/cuid2';
+import { CompletionChoice, CompletionCreateParams, CreateEmbeddingResponse, EmbeddingCreateParams } from "openai/resources";
+
+const MAX_CHUNK_SIZE = 20;
 
 export default class FinetuneDbClient {
     apiKey: string;
     baseUrl: string;
     projectId: string;
+    logReference: { id: string, createdAt: Date, updatedAt: Date }[] = [];
+    private queue: {
+        cuid: string,
+        type: "create" | "update",
+        payload: FinetuneDbPostLogRequest | FinetuneDbPutLogRequest,
+        response: FinetuneDbIngestResponseData | null,
+        timestamp: Date,
+        status: "pending" | "success" | "error",
+    }[] = [];
+    private queueRunning: boolean = false;
+
     constructor(
         {
             projectId = '',
@@ -21,10 +31,14 @@ export default class FinetuneDbClient {
             apiKey?: string;
             baseUrl?: string;
         }) {
-
         this.projectId = projectId;
         this.apiKey = apiKey;
         this.baseUrl = baseUrl;
+    }
+
+    // Get the finetuneDB log reference
+    getLogReferenceById = (id: string) => {
+        return this.logReference.find((log) => log.id === id);
     }
 
     private async postRequest(endpoint: string, requestBody: any) {
@@ -50,9 +64,16 @@ export default class FinetuneDbClient {
         return response;
     }
 
-    private async createLog(payload: FinetuneDbPostLogRequest) {
+    private createLog(payload: FinetuneDbPostLogRequest) {
         if (!this.apiKey) {
-            return;
+            return "";
+        }
+
+        // Add 1ms to timestamp to keep the order of events
+        let timestamp = new Date();
+        const lastEvent = this.queue?.[this.queue.length - 1];
+        if (lastEvent && lastEvent.timestamp >= timestamp) {
+            timestamp = new Date(lastEvent.timestamp.getTime() + 1);
         }
 
         const request = {
@@ -71,18 +92,30 @@ export default class FinetuneDbClient {
             metadata: payload.metadata,
             error: payload.error,
             latencyMs: payload.latencyMs,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
+            createdAt: timestamp.toISOString(),
+            updatedAt: timestamp.toISOString(),
+            inputTokenCount: payload.inputTokenCount ? payload.inputTokenCount : 0,
+            outputTokenCount: payload.outputTokenCount ? payload.outputTokenCount : 0,
         }
 
-        try {
-            const response = await this.postRequest('/logs', request);
-            const data: FinetuneDbPostLogResponse = await response.json();
-            return data;
+        this.queue.push({
+            cuid: payload.id,
+            type: "create",
+            payload: request,
+            response: null,
+            timestamp: timestamp,
+            status: "pending",
+        });
+
+        // Check if the queue size exceeds the maximum chunk size
+        if (this.queue.length > MAX_CHUNK_SIZE) {
+            this.processQueue();
+        } else {
+            this.debouncedProcessQueue();
         }
-        catch (error) {
-            console.warn("FinetuneDB: Unable to create log.");
-        }
+
+        const logId = payload.id;
+        return logId;
     }
 
     async updateLog(id: string, payload: FinetuneDbPutLogRequest) {
@@ -94,6 +127,12 @@ export default class FinetuneDbClient {
             return;
         }
 
+        // Add 1ms to timestamp to keep the order of events
+        let timestamp = new Date();
+        const lastEvent = this.queue?.[this.queue.length - 1];
+        if (lastEvent && lastEvent.timestamp >= timestamp) {
+            timestamp = new Date(lastEvent.timestamp.getTime() + 1);
+        }
 
         const request = {
             id: id,
@@ -102,17 +141,28 @@ export default class FinetuneDbClient {
             projectId: payload.projectId ? payload.projectId : this.projectId,
         }
 
-        try {
-            const response = await this.postRequest('/log/' + id, request);
-            const data: FinetuneDbPostLogResponse = await response.json();
-            return data;
+        this.queue.push({
+            cuid: id,
+            type: "update",
+            payload: request,
+            response: null,
+            timestamp: timestamp,
+            status: "pending",
+        });
+
+        // Check if the queue size exceeds the maximum chunk size
+        if (this.queue.length > MAX_CHUNK_SIZE) {
+            this.processQueue();
+        } else {
+            this.debouncedProcessQueue();
         }
-        catch (error) {
-            console.warn("FinetuneDB: Unable to update log.");
-        }
+
+        const logId = id;
+        return logId;
     }
 
     async logOther({
+        id,
         projectId,
         parentId,
         name,
@@ -124,6 +174,7 @@ export default class FinetuneDbClient {
         error = "",
         latency = 0,
     }: {
+        id: string,
         projectId: string,
         parentId: string,
         name: string,
@@ -140,12 +191,12 @@ export default class FinetuneDbClient {
         }
 
         const payload = {
-            id: "",
+            id: id,
             name: name,
             parentId: parentId,
             tags: tags,
             provider: "openai",
-            source: source ? source : "openai-node",
+            source: source ? source : "node-sdk",
             projectId: projectId,
             model: "",
             modelParameters: {
@@ -159,18 +210,8 @@ export default class FinetuneDbClient {
             latencyMs: latency,
         }
 
-        try {
-            const data = await this.createLog(payload);
-
-            if (data?.success) {
-                return data;
-            } else {
-                console.warn("FinetuneDB: Unable to log completion.", data?.message);
-            }
-        }
-        catch (error) {
-            console.warn("FinetuneDB: Unable to log completion.");
-        }
+        const logId = this.createLog(payload);
+        return logId;
     }
 
     async logCompletion(
@@ -181,6 +222,8 @@ export default class FinetuneDbClient {
             provider,
             body,
             response,
+            inputTokenCount = 0,
+            outputTokenCount = 0,
             latency,
             error,
             tags = [],
@@ -193,6 +236,8 @@ export default class FinetuneDbClient {
             body: (CompletionCreateParams) & FinetuneDbCompletionArgs,
             response: CompletionChoice[] | null,
             latency: number,
+            inputTokenCount?: number,
+            outputTokenCount?: number,
             error?: string,
             tags?: string[],
             metadata?: Record<string, any>,
@@ -203,7 +248,7 @@ export default class FinetuneDbClient {
         }
 
         const payload = {
-            id: "",
+            id: createId(),
             parentId: parentId,
             name: name,
             tags: tags,
@@ -227,20 +272,16 @@ export default class FinetuneDbClient {
             output: response ? response.map((choice) => choice.text) : "",
             error: error,
             latencyMs: latency,
+            inputTokenCount: inputTokenCount,
+            outputTokenCount: outputTokenCount,
         }
 
-        const data = await this.createLog(payload);
-
-        if (data?.success) {
-            return data;
-        } else {
-            console.warn("FinetuneDB: Unable to log completion.", data?.message);
-        }
-
-        return data;
+        const logId = this.createLog(payload);
+        return logId;
     }
 
-    async logChatCompletion(
+
+    logChatCompletion(
         {
             projectId,
             parentId,
@@ -249,6 +290,8 @@ export default class FinetuneDbClient {
             body,
             response,
             latency,
+            inputTokenCount = 0,
+            outputTokenCount = 0,
             error,
             tags = [],
             metadata = {},
@@ -260,21 +303,23 @@ export default class FinetuneDbClient {
             body: (ChatCompletionCreateParamsBase | ChatCompletionCreateParamsNonStreaming | ChatCompletionCreateParamsStreaming) & FinetuneDbCompletionArgs,
             response: ChatCompletion | null,
             latency: number,
+            inputTokenCount?: number,
+            outputTokenCount?: number,
             error?: string,
             tags?: string[],
             metadata?: Record<string, any>,
         }
     ) {
         if (!this.apiKey) {
-            return;
+            return "";
         }
 
         const payload = {
-            id: "",
+            id: createId(),
             parentId: parentId,
             tags: tags,
             provider: provider,
-            source: "openai-node",
+            source: "node-sdk",
             projectId: projectId ? projectId : this.projectId,
             model: body.model,
             modelParameters: {
@@ -293,26 +338,96 @@ export default class FinetuneDbClient {
             output: response?.choices?.[0].message ? [response.choices[0].message] : [],
             error: error,
             latencyMs: latency,
+            inputTokenCount: inputTokenCount,
+            outputTokenCount: outputTokenCount,
         }
 
-        const data = await this.createLog(payload);
-
-        if (data?.success) {
-            return data;
-        } else {
-            console.warn("FinetuneDB: Unable to log completion.", data?.message);
-        }
-
-        return data;
+        const logId = this.createLog(payload);
+        return logId;
     }
 
-    async logEmbedding(
+    // Wait 500ms to allow other events to be added to the queue
+    private debouncedProcessQueue = debounce(() => this.processQueue(), 500);
+
+    async processQueue() {
+        const itemsToProcess = this.queue.filter((event) => event.status === "pending");
+        if (!itemsToProcess.length || this.queueRunning) return;
+
+        this.queueRunning = true;
+
+        try {
+            const copy = this.queue.filter((event) => event.status === "pending");
+
+            // console.log("FinetuneDB: Sending", copy.length, "event(s) to FinetuneDB");
+
+            const response = await this.postRequest('/ingestBulk', copy.map((event) => { return { type: event.type, payload: event.payload } }));
+            const data: FinetuneDbIngestResponse = await response.json();
+
+            if (data.success && data.finished) {
+                const failed = data.data.filter((event) => !event.success);
+                const success = data.data.filter((event) => event.success);
+
+                if (failed.length > 0) {
+                    console.warn("FinetuneDB: Failed to send", failed.length, "event(s) to FinetuneDB");
+                    console.warn("FinetuneDB: Failed events", failed);
+                }
+
+                for (const event of success) {
+                    const index = this.queue.findIndex((item) => item.cuid === event.id && item.status === "pending");
+                    if (index !== -1) {
+                        this.queue[index].status = "success";
+                        this.queue[index].response = event.data;
+                    }
+                }
+                for (const event of failed) {
+                    const index = this.queue.findIndex((item) => item.cuid === event.id && item.status === "pending");
+                    if (index !== -1) {
+                        this.queue[index].status = "error";
+                        this.queue[index].response = event.data;
+                    }
+                }
+            } else if (!data.success) {
+                console.warn("FinetuneDB: Failed to send event(s) to FinetuneDB");
+                this.queueRunning = false;
+                return;
+            }
+
+            // Clean up the queue
+            const completedItems = this.queue.filter((event) => event.status === "success");
+            for (const event of completedItems) {
+                if (event.response?.id && event.response.createdAt && event.response.updatedAt) {
+                    this.logReference.push({
+                        id: event.response.id,
+                        createdAt: new Date(event.response.createdAt),
+                        updatedAt: new Date(event.response.updatedAt)
+                    });
+                }
+            }
+            this.queue = this.queue.filter((event) => event.status !== "success" && event.status !== "error");
+
+            this.queueRunning = false;
+
+            const newItemsToProcess = this.queue.filter((event) => event.status === "pending");
+
+            // If there are new events in the queue
+            if (newItemsToProcess.length) {
+                this.processQueue();
+            }
+
+        } catch (error) {
+            this.queueRunning = false;
+            console.error("Error sending event(s) to FinetuneDB", error);
+        }
+    }
+
+    logEmbedding(
         {
             projectId,
             parentId,
             body,
             response,
             latency,
+            inputTokenCount = 0,
             error = "",
             tags = [],
             metadata = {},
@@ -322,17 +437,18 @@ export default class FinetuneDbClient {
             body: (EmbeddingCreateParams) & FinetuneDbCompletionArgs,
             response: CreateEmbeddingResponse | null,
             latency: number,
+            inputTokenCount?: number,
             error?: string,
             tags?: string[],
             metadata?: Record<string, any>,
         }
     ) {
         if (!this.apiKey) {
-            return;
+            return "";
         }
 
         const payload = {
-            id: "",
+            id: createId(),
             parentId: parentId,
             tags: tags,
             model: body.model,
@@ -349,16 +465,17 @@ export default class FinetuneDbClient {
             output: response?.data ? response.data : [],
             error: error,
             latencyMs: latency,
+            inputTokenCount: inputTokenCount,
         }
 
-        const data = await this.createLog(payload);
+        const logId = this.createLog(payload);
+        return logId;
+    }
 
-        if (data?.success) {
-            return data;
-        } else {
-            console.warn("FinetuneDB: Unable to log completion.", data?.message);
-        }
-
-        return data;
+    /**
+     * Make sure the queue is flushed before exiting the program
+     */
+    async flush() {
+        await this.processQueue();
     }
 }

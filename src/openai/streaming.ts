@@ -6,21 +6,18 @@ import mergeChunks from "./mergeChunks";
 export class WrappedStream extends Stream<ChatCompletionChunk> {
     finetunedb: FinetuneDbCompletionMeta;
 
-    private resolvelogResult: () => void = () => { };
-    private report: (response: ChatCompletion | null) => Promise<FinetuneDbPostLogResponse | void>;
+    private report: (response: ChatCompletion | null) => string;
 
-    constructor(stream: Stream<ChatCompletionChunk>, report: (response: ChatCompletion | null) => Promise<FinetuneDbPostLogResponse | void>) {
+    constructor(stream: Stream<ChatCompletionChunk>, report: (response: ChatCompletion | null) => string) {
         // @ts-expect-error - This is a private property but we need to access it
         super(stream.iterator, stream.controller);
         this.report = report;
 
-        const logResult = new Promise<void>((resolve) => {
-            this.resolvelogResult = resolve;
-        });
+        const logId = "";
 
         this.finetunedb = {
-            logResult,
-            getLastLogId: async () => {
+            logId,
+            getLastLogId: () => {
                 return "";
             },
             updateLastLog: async () => {
@@ -42,8 +39,5 @@ export class WrappedStream extends Stream<ChatCompletionChunk> {
         }
 
         await this.report(combinedResponse);
-
-        // Resolve the promise here
-        this.resolvelogResult();
     }
 }

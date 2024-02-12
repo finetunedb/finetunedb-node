@@ -6,6 +6,7 @@ import { type Document } from "langchain/document";
 import { FinetuneDbPostLogResponse } from "../shared";
 import { ChatCompletionMessageParam } from "openai/resources";
 import { HandleLLMNewTokenCallbackFields } from "langchain/dist/callbacks/base";
+import { createId } from "@paralleldrive/cuid2";
 
 export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
     name = "FinetuneDbCallbackHandler";
@@ -42,6 +43,7 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
         let groupCreated = false;
         if (!this.logId) {
             const newLogId = await this.finetuneDbClient?.logOther({
+                id: createId(),
                 projectId: this.projectId ?? "",
                 parentId: parentRunId ? this.runIdToLogId[parentRunId] : this.topLevelGroupId ? this.runIdToLogId[this.topLevelGroupId] : "",
                 name: chain && chain.id ? chain.id.join(".") : "",
@@ -57,10 +59,9 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
                 error: "",
                 latency: 0,
             });
-            if (newLogId && newLogId.success) {
-                this.logId = newLogId.data.id;
+            if (newLogId) {
+                this.logId = newLogId;
                 this.runIdToLogId[runId] = this.logId;
-                this.runIdToLog[runId] = newLogId;
                 groupCreated = true;
             }
         }
@@ -77,6 +78,7 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
         metadata?: Record<string, unknown> | undefined
     ) {
         const newLogId = await this.finetuneDbClient?.logOther({
+            id: createId(),
             projectId: this.projectId ?? "",
             parentId: parentRunId ? this.runIdToLogId[parentRunId] : this.topLevelGroupId ? this.runIdToLogId[this.topLevelGroupId] : this.runIdToLogId[runId],
             name: chain && chain.id ? chain.id.join(".") : "",
@@ -92,10 +94,9 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
             error: "",
             latency: 0,
         });
-        if (newLogId && newLogId.success) {
-            this.logId = newLogId.data.id;
+        if (newLogId) {
+            this.logId = newLogId;
             this.runIdToLogId[runId] = this.logId;
-            this.runIdToLog[runId] = newLogId;
         }
     }
 
@@ -219,10 +220,9 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
                 tags: tags ? tags : [],
             });
 
-            if (newLogId && newLogId.success) {
-                this.logId = newLogId.data.id;
+            if (newLogId) {
+                this.logId = newLogId;
                 this.runIdToLogId[runId] = this.logId;
-                this.runIdToLog[runId] = newLogId;
             }
         }
 
@@ -300,10 +300,9 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
                 tags: tags ? tags : [],
             });
 
-            if (newLogId && newLogId.success) {
-                this.logId = newLogId.data.id;
+            if (newLogId) {
+                this.logId = newLogId;
                 this.runIdToLogId[runId] = this.logId;
-                this.runIdToLog[runId] = newLogId;
             }
         }
 
@@ -332,12 +331,19 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
     async handleChainEnd(outputs: ChainValues, runId: string, parentRunId?: string | undefined): Promise<void> {
         try {
             const log = this.runIdToLog[runId];
+
+            let latency = 0;
+            const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+            if (logCreationTime) {
+                latency = Date.now() - new Date(logCreationTime).getTime();
+            }
+
             await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                 projectId: this.projectId ?? "",
                 source: "langchain",
                 parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
                 output: outputs,
-                latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                latencyMs: latency,
             });
         } catch (e) {
             console.log("Error:", e);
@@ -347,12 +353,18 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
     async handleChainError(error: Error, runId: string, parentRunId?: string | undefined): Promise<void> {
         // We wait becaue we want to make sure the log is sent before we update it.
         setTimeout(async () => {
+            let latency = 0;
+            const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+            if (logCreationTime) {
+                latency = Date.now() - new Date(logCreationTime).getTime();
+            }
+
             try {
                 await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                     projectId: this.projectId ?? "",
                     source: "langchain",
                     error: error.message,
-                    latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                    latencyMs: latency,
                 });
             } catch (e) {
                 console.log("Error:", e);
@@ -436,12 +448,21 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
             }
 
             if (this.finetuneDbClient) {
+
+                let latency = 0;
+                const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+                if (logCreationTime) {
+                    latency = Date.now() - new Date(logCreationTime).getTime();
+                }
+
                 const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                     projectId: this.projectId ?? "",
                     source: "langchain",
                     parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
                     output: finalOutput,
-                    latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                    latencyMs: latency,
+                    inputTokenCount: output.llmOutput?.tokenUsage?.promptTokens,
+                    outputTokenCount: output.llmOutput?.tokenUsage?.completionTokens,
                 });
             }
         } catch (e) {
@@ -463,12 +484,18 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
 
     async handleToolEnd(output: string, runId: string, parentRunId?: string | undefined): Promise<void> {
         try {
+            let latency = 0;
+            const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+            if (logCreationTime) {
+                latency = Date.now() - new Date(logCreationTime).getTime();
+            }
+
             const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                 projectId: this.projectId ?? "",
                 source: "langchain",
                 parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
                 output: output,
-                latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                latencyMs: latency,
             });
         } catch (e) {
             console.log("Error:", e);
@@ -480,13 +507,20 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
         setTimeout(async () => {
             try {
                 let log = this.runIdToLog[runId];
+
+                let latency = 0;
+                const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+                if (logCreationTime) {
+                    latency = Date.now() - new Date(logCreationTime).getTime();
+                }
+
                 const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                     projectId: this.projectId ?? "",
                     source: "langchain",
                     error: error.message,
                     parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
                     type: log.data.type,
-                    latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                    latencyMs: latency,
                 });
             } catch (e) {
                 console.log("Error:", e);
@@ -515,12 +549,18 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
         parentRunId?: string | undefined
     ): Promise<void> {
         try {
+            let latency = 0;
+            const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+            if (logCreationTime) {
+                latency = Date.now() - new Date(logCreationTime).getTime();
+            }
+
             const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                 projectId: this.projectId ?? "",
                 source: "langchain",
                 parentId: parentRunId ? this.runIdToLogId[parentRunId] : undefined,
                 output: documents,
-                latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                latencyMs: latency,
             });
         } catch (e) {
             console.log("Error:", e);
@@ -531,11 +571,17 @@ export class FinetuneDbCallbackHandler extends BaseCallbackHandler {
         // We wait becaue we want to make sure the log is sent before we update it.
         setTimeout(async () => {
             try {
+                let latency = 0;
+                const logCreationTime = this.finetuneDbClient?.getLogReferenceById(this.runIdToLogId[runId])?.createdAt;
+                if (logCreationTime) {
+                    latency = Date.now() - new Date(logCreationTime).getTime();
+                }
+
                 const result = await this.finetuneDbClient?.updateLog(this.runIdToLogId[runId], {
                     projectId: this.projectId ?? "",
                     source: "langchain",
                     error: error.message,
-                    latencyMs: this.runIdToLog[runId] ? Date.now() - new Date(this.runIdToLog[runId].data.createdAt).getTime() : 0,
+                    latencyMs: latency
                 });
             } catch (e) {
                 console.log("Error:", e);
