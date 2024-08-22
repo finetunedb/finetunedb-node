@@ -31,6 +31,9 @@ export default class OpenAI extends openai.OpenAI {
   public finetuneDbClient?: FinetuneDbClient;
 
   constructor({ finetunedb, ...options }: ClientOptions = {}) {
+    if (finetunedb && options?.baseURL?.includes("inference.finetunedb.com")) {
+      options.apiKey = finetunedb.apiKey;
+    }
     super({ ...options });
 
     const finetuneDbApiKey =
@@ -504,4 +507,3 @@ class WrappedEmbeddings extends openai.OpenAI.Embeddings {
     }
   }
 }
-
